@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, minimum-scale=1, initial-scale=1, user-scalable=yes">
+
+    <title>crob-object-grouper test</title>
+
+    <script src="../../webcomponentsjs/webcomponents-loader.js"></script>
+    <script src="../../web-component-tester/browser.js"></script>
+
+    <link rel="import" href="../crob-object-grouper.html">
+    <link rel="import" href="./change-observer.html">
+  </head>
+  <body>
+    
+  <test-fixture id="ObservedFixture">
+      <template>
+          <dom-bind>
+              <template>
+                  <crob-object-grouper id="grouper" items="{{items}}" groupBy="[[groupBy]]" groups="{{groups}}"></crob-object-grouper>
+                  <change-observer id="observer" items="[[items]]" groups="[[groups]]"></change-observer>
+              </template>
+          </dom-bind>
+      </template>
+  </test-fixture>
+
+    <script>
+      suite('<crob-object-grouper>', () => {
+        suite('initialisation', () => {
+          let observer, objectGrouper;
+          setup(() => {
+            let domBind = fixture('ObservedFixture');
+            objectGrouper = domBind.$.grouper;
+            observer = domBind.$.observer;
+          });
+          
+          test('the groups are empty when neither the items or groupBy properties have been set', () => {
+            assert.equal(Object.keys(objectGrouper.groups).length, 0);
+          });
+
+          test('the groups are still empty when only the items property is set', () => {
+            objectGrouper.set('items', [{
+              'name' : 'TestItem',
+              'group' : 'A'
+            }]);
+            assert.equal(Object.keys(objectGrouper.groups).length, 0);
+          });
+
+          test('the groups are still empty when only the groupBy property is set', () => {
+            objectGrouper.set('groupBy', 'group');
+            assert.equal(Object.keys(objectGrouper.groups).length, 0);
+          });
+
+          test('the groups are initialised correctly when the items property is set before the groupBy property', () => {
+            let firstItem = {
+              'name' : 'First',
+              'group' : 'A'
+            };
+            let secondItem = {
+              'name' : 'Second',
+              'group' : 'B'
+            };
+            
+            objectGrouper.set('items', [firstItem, secondItem]);
+            objectGrouper.set('groupBy', 'group');
+            assertGroupsMatch(objectGrouper, observer, {
+              'A' : [firstItem],
+              'B' : [secondItem]
+            });
+          });
+
+          test('the groups are initialised correctly when the groupBy property is set before the items property', () => {
+            let firstItem = {
+              'name' : 'First',
+              'group' : 'A'
+            };
+            let secondItem = {
+              'name' : 'Second',
+              'group' : 'B'
+            };
+            
+            objectGrouper.set('groupBy', 'group');
+            objectGrouper.set('items', [firstItem, secondItem]);
+            assertGroupsMatch(objectGrouper, observer, {
+              'A' : [firstItem],
+              'B' : [secondItem]
+            });
+          });
+        });
+
+        suite('modifications', () => {
+          let domBind, observer, objectGrouper, items;
+
+          setup(() => {
+            items = [{
+              'group' : 'A',
+              'name' : 'First'
+            }, {
+              'group' : 'B',
+              'name' : 'Second'
+            }, {
+              'group' : 'C',
+              'name' : 'Third'
+            }, {
+              'group' : 'A',
+              'name' : 'Fourth'
+            }, {
+              'group' : 'B',
+              'name' : 'Fifth'
+            }, {
+              'group' : 'C',
+              'name' : 'Sixth'
+            }, {
+              'group' : 'A',
+              'name' : 'Seventh'
+            }, {
+              'group' : 'B',
+              'name' : 'Eighth'
+            }, {
+              'group' : 'C',
+              'name' : 'Ninth'
+            }];
+
+            domBind = fixture('ObservedFixture');
+            objectGrouper = domBind.$.grouper;
+            objectGrouper.set('groupBy', 'group');
+            objectGrouper.set('items', items.slice());
+            observer = domBind.$.observer;
+          });
+
+          test('replacing the value of the groupBy property causes the groups to be re-created', () => {
+            objectGrouper.set('groupBy', 'name');
+            assertGroupsMatch(objectGrouper, observer, {
+              'First' : [items[0]],
+              'Second' : [items[1]],
+              'Third' : [items[2]],
+              'Fourth' : [items[3]],
+              'Fifth' : [items[4]],
+              'Sixth' : [items[5]],
+              'Seventh' : [items[6]],
+              'Eighth' : [items[7]],
+              'Ninth' : [items[8]]
+            });
+          });
+
+          test('replacing the value of the items property causes the groups to be re-created', () => {
+            let newItems = [{
+              'group' : 'D',
+              'name' : 'Tenth'
+            }, {
+              'group' : 'E',
+              'name' : 'Eleventh'
+            }, {
+              'group' : 'F',
+              'name' : 'Twelfth'
+            }];
+
+            objectGrouper.set('items', newItems);
+            assertGroupsMatch(objectGrouper, observer, {
+              'D' : [newItems[0]],
+              'E' : [newItems[1]],
+              'F' : [newItems[2]]
+            });
+          });
+
+          test('replacing an object in the items property with another object with the same groupBy value replaces the existing object in the group', () => {
+            let newItem = {
+              'group' : 'A',
+              'name' : 'Tenth'
+            };
+
+            objectGrouper.set('items.0', newItem);
+            assertGroupsMatch(objectGrouper, observer, {
+              'A' : [newItem, items[3], items[6]],
+              'B' : [items[1], items[4], items[7]],
+              'C' : [items[2], items[5], items[8]]
+            });
+          });
+
+          test('replacing an object in the items property with another object with a different existing groupBy value removes the old object in the group and creates a new one in the new group', () => {
+            let newItem = {
+              'group' : 'B',
+              'name' : 'Tenth'
+            };
+
+            objectGrouper.set('items.0', newItem);
+            assertGroupsMatch(objectGrouper, observer, {
+              'A' : [items[3], items[6]],
+              'B' : [newItem, items[1], items[4], items[7]],
+              'C' : [items[2], items[5], items[8]]
+            });
+          });
+
+          test('replacing an object in the items property with another object with a different and new groupBy value removes the old object in the group and create a new group for the object', () => {
+            let newItem = {
+              'group' : 'D',
+              'name' : 'Tenth'
+            };
+
+            objectGrouper.set('items.0', newItem);
+            assertGroupsMatch(objectGrouper, observer, {
+              'A' : [items[3], items[6]],
+              'B' : [items[1], items[4], items[7]],
+              'C' : [items[2], items[5], items[8]],
+              'D' : [newItem]
+            });
+          });
+
+          test('replacing an object in the items property with an object that does not have the groupBy property causes it to be spliced out of the group it was previously in', () => {
+            let newItem = {
+              'name' : 'Tenth'
+            };
+            objectGrouper.set('items.0', newItem);
+            assertGroupsMatch(objectGrouper, observer, {
+              'A' : [items[3], items[6]],
+              'B' : [items[1], items[4], items[7]],
+              'C' : [items[2], items[5], items[8]]
+            });
+          });
+          
+          test('replacing an object in the items property with an undefined value causes it to be spliced out of the group it was previously in', () => {
+            objectGrouper.set('items.0', null);
+            assertGroupsMatch(objectGrouper, observer, {
+              'A' : [items[3], items[6]],
+              'B' : [items[1], items[4], items[7]],
+              'C' : [items[2], items[5], items[8]]
+            });
+          });
+
+          [ { 'description' : 'inserting at start', 'insertIndex' : 0 },
+            { 'description' : 'inserting in the middle', 'insertIndex' : 1 },
+            { 'description' : 'inserting at the end', 'insertIndex' : 3 },
+          ].forEach((testCase) => {
+            test(`objects added to the items property will create a new group if they have a groupBy value that did not previously exist [${testCase.description}]`, () => {
+              let newItem = {
+                'group' : 'D',
+                'name' : 'Tenth'
+              };
+              
+              objectGrouper.splice('items', testCase.insertIndex, 0, newItem);
+              assertGroupsMatch(objectGrouper, observer, {
+                'A' : [items[0], items[3], items[6]],
+                'B' : [items[1], items[4], items[7]],
+                'C' : [items[2], items[5], items[8]],
+                'D' : [newItem]
+              });
+            });
+          });
+          
+          [ { 'description' : 'inserting at start', 'insertIndex' : 0, 'expectedGroupIndex' : 0 },
+            { 'description' : 'inserting in the middle', 'insertIndex' : 4, 'expectedGroupIndex' : 2 },
+            { 'description' : 'inserting at the end', 'insertIndex' : 9, 'expectedGroupIndex' : 3 },
+          ].forEach((testCase) => {
+            test(`objects added to the items property are added into the correct group if they have a groupBy value that already exists [${testCase.description}]`, () => {
+              let newItem = {
+                'group' : 'A',
+                'name' : 'Tenth'
+              };
+              
+              var expectedGroupItems = [items[0], items[3], items[6]];
+              expectedGroupItems.splice(testCase.expectedGroupIndex, 0, newItem);
+
+              objectGrouper.splice('items', testCase.insertIndex, 0, newItem);
+              assertGroupsMatch(objectGrouper, observer, {
+                'A' : expectedGroupItems,
+                'B' : [items[1], items[4], items[7]],
+                'C' : [items[2], items[5], items[8]]
+              });
+            });
+          });
+
+          [
+            { 'description' : 'removing from the start', 'removedIndex' : 0, 'groupItem' : { 'group' : 'A', 'index' : 0 } },
+            { 'description' : 'removing from the middle', 'removedIndex' : 1, 'groupItem' : { 'group' : 'B', 'index' : 0 } },
+            { 'description' : 'removing from the end', 'removedIndex' : 2, 'groupItem' : { 'group' : 'C', 'index' : 0 } }
+          ].forEach((testCase) => {
+            test(`objects removed from the items property are also removed from their respective groups [${testCase.description}]`, () => {
+              objectGrouper.splice('items', testCase.removedIndex, 1);
+              var expectedGroups = {
+                'A' : [items[0], items[3], items[6]],
+                'B' : [items[1], items[4], items[7]],
+                'C' : [items[2], items[5], items[8]]
+              };
+              expectedGroups[testCase.groupItem.group].splice(testCase.groupItem.index, 1);
+              assertGroupsMatch(objectGrouper, observer, expectedGroups);
+            });
+          });
+
+          test('changing the value of an objects groupBy property value to a group name that already exists causes it to be moved to that group', () => {
+            objectGrouper.set('items.0.group', 'B');
+            assertGroupsMatch(objectGrouper, observer, {
+              'A' : [items[3], items[6]],
+              'B' : [items[0], items[1], items[4], items[7]],
+              'C' : [items[2], items[5], items[8]]
+            });
+          });
+
+          test('changing the value of an objects groupBy property value to a group name that does not exist causes a new group to be created', () => {
+            objectGrouper.set('items.0.group', 'D');
+            assertGroupsMatch(objectGrouper, observer, {
+              'A' : [items[3], items[6]],
+              'B' : [items[1], items[4], items[7]],
+              'C' : [items[2], items[5], items[8]],
+              'D' : [items[0]]
+            });
+          });
+
+          test('changing the value of an objects groupBy property value to a null value causes it to be removed from its current group', () => {
+            objectGrouper.set('items.0.group', null);
+            assertGroupsMatch(objectGrouper, observer, {
+              'A' : [items[3], items[6]],
+              'B' : [items[1], items[4], items[7]],
+              'C' : [items[2], items[5], items[8]]
+            });
+          });
+        });
+      });
+
+      function assertItemsMatch(actualItems, expectedItems) {
+        assert.equal(actualItems.length, expectedItems.length, 'incorrect number of items');
+        for (var i = 0; i < actualItems.length; i++) {
+          assert.equal(actualItems[i], expectedItems[i], `item at index ${i} does not match`);
+        }
+      }
+
+      function assertGroupsMatch(grouper, observer, expectedGroups) {
+        let expectedEntries = Object.entries(expectedGroups);
+        let actualGroupNames = Object.keys(grouper.groups);
+        assert.equal(actualGroupNames.length, expectedEntries.length, 'incorrect number of groups');
+        assert.sameMembers(actualGroupNames, grouper.groupNames, 'group names do not match');
+        expectedEntries.forEach(function(expectedEntry) {
+          let expectedGroupName = expectedEntry[0];
+          let expectedGroupItems = expectedEntry[1];
+          let group = grouper.groups[expectedGroupName];
+          assert.isDefined(group,  `missing expected group ${expectedGroupName}`);
+          assert.equal(group.length, expectedGroupItems.length, `incorrect number of items in group ${expectedGroupName}`);
+          expectedGroupItems.forEach(function(expectedItem, index) {
+            assert.equal(group[index], expectedItem, `item in group ${expectedGroupName} at index ${index} does not match`);
+            let itemsPath = 'items.' + grouper.items.indexOf(expectedItem);
+            let groupsPath = 'groups.' + expectedGroupName + '.' + index;
+            assertPathsLinked(grouper, observer, itemsPath, groupsPath);
+          });
+        });
+      }
+
+      function assertPathsLinked(grouper, observer, itemsPath, groupsPath) {
+        let itemsObject = grouper.get(itemsPath);
+        observer.onGroupsChanged = sinon.spy();
+        grouper.set(itemsPath + '.testproperty', 'value');
+        assert.isTrue(observer.onGroupsChanged.calledOnce, `updating ${itemsPath} did not fire a change event for ${groupsPath}`);
+        assert.equal(observer.onGroupsChanged.firstCall.args[0].path, groupsPath + '.testproperty', `updating ${itemsPath} fired a change event with the wrong path`);
+        assert.equal(observer.onGroupsChanged.firstCall.args[0].value, 'value', `updating ${itemsPath} fired a change event with the wrong value`);
+        delete itemsObject['testproperty'];
+
+        let groupObject = grouper.get(groupsPath);
+        observer.onItemsChanged = sinon.spy();
+        grouper.set(groupsPath + '.testproperty', 'value');
+        assert.isTrue(observer.onItemsChanged.calledOnce, `updating ${groupsPath} did not fire a change event for ${itemsPath}`);
+        assert.equal(observer.onItemsChanged.firstCall.args[0].path, itemsPath + '.testproperty', `updating ${groupsPath} fired a change event with the wrong path`);
+        assert.equal(observer.onItemsChanged.firstCall.args[0].value, 'value', `updating ${groupsPath} fired a change event with the wrong value`);
+        delete groupObject['testproperty'];
+      }
+    </script>
+  </body>
+</html>

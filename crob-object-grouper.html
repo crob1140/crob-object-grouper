@@ -1,0 +1,612 @@
+<!doctype html>
+
+<link rel="import" href="../polymer/polymer.html">
+
+<!--
+  '<crob-object-grouper>' is a utility component that can used to group objects into groups defined by a property value.
+
+  This component ensures that any changes to the properties of an object in either the 'items' property or the group
+  will also fire a change notification for the corresponding path in the other property.
+-->
+<dom-module id="crob-object-grouper">
+  <script>
+    Polymer({
+      is: 'crob-object-grouper',
+      
+      properties: {
+        /**
+         * The objects to be divided into groups.
+         */
+        items : {
+          type: Array,
+          notify: true
+        },
+
+        /**
+         * The name of the property to use for each object in the 'items' property to define which group it belongs to.
+         */
+        groupBy : {
+          type : String
+        },
+
+        /**
+         * The groups formed by dividing the objects given in the 'items' according to their 'groupBy' property values. 
+         */
+        groups : {
+          type : Object,
+          notify : true,
+          readOnly: true,
+          value : function() {
+            return {};
+          }
+        },
+
+        /**
+         * The names of the non-empty groups.
+         * This property can be used to determine the valid keys for the 'groups' property.
+         */
+        groupNames : {
+          type : Array,
+          readOnly : true,
+          value : function() {
+            return [];
+          }
+        }
+      },
+      
+      observers : [
+        '_onItemsChanged(items.*)',
+        '_onGroupByChanged(groupBy)',
+        '_onGroupsChanged(groups.*)'
+      ],
+
+      created : function() {
+        this._itemIndexes = {}; // group name -> group index -> items index
+        this._groupNames = []; // items index -> group name 
+        this._groupIndexes = []; // items index -> group index
+      },
+
+      /**
+       * Processes changes to the 'groupBy' property.
+       * 
+       * @private
+       */
+      _onGroupByChanged : function() {
+        this._rebuildGroups();
+      },
+
+      /**
+       * Processes changes to the 'items' property and any of it's subproperties.
+       * 
+       * @param {Object} changeRecord - A record describing the change that occurred to the 'items' property.
+       * @private
+       */
+      _onItemsChanged : function(changeRecord) {
+        if (!this._isDefined(this.groupBy)) {
+          return;
+        }
+
+        var changePath = changeRecord.path;
+        if (changePath === 'items') {
+          this._rebuildGroups();
+        } else {
+          var pathSegments = this._getSegments(changePath, 3);
+          if (pathSegments[1] === 'splices') {
+            var splices = changeRecord.value.indexSplices;
+            this._processItemsSplices(splices);
+          } else if (pathSegments[1] !== "length") {
+            // At this point, we know that the change only affects a single item,
+            // so we just need to determine whether it affects which group that item belongs to
+            var itemsIndex = parseInt(pathSegments[1]);
+            var isGroupChanged = false;
+            if (pathSegments.length == 3) {
+              isGroupChanged = pathSegments[2] === this.groupBy;
+            } else if (pathSegments.length == 2) {
+              var itemsPath = 'items.' + itemsIndex;
+              var isItemReplaced = changePath === itemsPath;
+              if (isItemReplaced) {            
+                var item = this.items[itemsIndex];
+                var currentGroupName = this._groupNames[itemsIndex];
+                var newGroupName = (this._isDefined(item)? item[this.groupBy] : null);
+                var isGroupChanged = newGroupName !== currentGroupName;
+
+                // If the group hasn't changed but the item has, then we need to replace
+                // the corresponding group item as well (since the path links only handle
+                // subproperty changes and not replacements of the objects themselves)
+                if (!isGroupChanged) {
+                  var groupIndex = this._groupIndexes[itemsIndex];
+                  var groupsPath = 'groups.' + currentGroupName + '.' + groupIndex;
+                  this.set(groupsPath, item);
+                }
+              }
+            }
+
+            if (isGroupChanged) {
+              this._relocateItemToCorrectGroup(itemsIndex);
+            }
+          }
+        }
+      },
+      
+      /**
+       * Processes a list of splices performed on the 'items' property in order to
+       * reflect the change on to the corresponding groups.
+       * 
+       * @param {Object[]} itemsSplices - The splices that were performed on the 'items' property.
+       * @private
+       */
+      _processItemsSplices : function(itemsSplices) {
+        // Calculate the group splices before changing any of the path links
+        // so that we can use the data to determine what each of the removed
+        // items used to be linked to
+        var groupsSplices = this._calculateGroupSplices(itemsSplices);
+        
+        // Sort all of the splices in descending order by index, so that
+        // we can apply index shift without breaking paths we haven't
+        // visited yet.
+        itemsSplices.sort(function(a, b) {
+          return b.index - a.index;
+        });
+
+        for (var i = 0; i < itemsSplices.length; i++) {
+          var splice = itemsSplices[i];
+          var index = splice.index;
+          var addedCount = splice.addedCount;
+          var removedCount = splice.removed.length;
+
+          // Remove all of the path links for the items that were removed
+          for (var i = index; i < (index + removedCount); i++) {
+            this._removePathLink(i);
+          }
+
+          // Update the path links for everything following the splice, since
+          // their indexes would have been shifted by the removals/additions
+          var indexShift = addedCount - removedCount;
+          if (indexShift !== 0) {
+            var firstShiftedIndex = index + addedCount;
+            var lastShiftedIndex = this.items.length - 1;
+            var applyIndexShift = function(currentIndex) {
+              var previousItemsIndex = currentIndex - indexShift;
+              var groupName = this._groupNames[previousItemsIndex];
+              var groupIndex = this._groupIndexes[previousItemsIndex];
+              this._removePathLink(previousItemsIndex);
+              this._createPathLink(currentIndex, groupName, groupIndex);
+            }.bind(this);
+
+            // Iteration order depends on the value of the index shift, because we
+            // need to make sure we aren't overriding values we haven't visited yet
+            if (indexShift > 0) {
+              for (var i = lastShiftedIndex; i >= firstShiftedIndex; i--) {
+                applyIndexShift(i);
+              }
+            } else {
+              for (var i = firstShiftedIndex; i <= lastShiftedIndex; i++) {
+                applyIndexShift(i);
+              }
+            }
+          }
+        }
+
+        // Perform each of the group splices that were calculated at the beginning
+        var groupsSplicesEntries = Object.entries(groupsSplices);
+        for (var i = 0; i < groupsSplicesEntries.length; i++) {
+          var entry = groupsSplicesEntries[i];
+          var groupName = entry[0];
+          var groupSplices = entry[1];
+          for (var j = 0; j < groupSplices.length; j++) {
+            var splice = groupSplices[j];
+            this._performGroupSplice(groupName, splice);
+          }
+        }
+      },
+
+      /**
+       * Performs a splice on a group to add and/or remove items.
+       * 
+       * @param {string} groupName - The name of the group to perform the splice on.
+       * @param {GroupSplice} splice - A description of the splice to perform on the group.
+       * @private
+       */
+      _performGroupSplice : function(groupName, splice) {
+        // Update the path links for all items following the splice
+        var addedCount = splice.added.length;
+        var removedCount = splice.removedCount;
+        var indexShift = addedCount - removedCount;
+        if (indexShift !== 0) {
+          var groupItems = this.groups[groupName];
+          var firstShiftedIndex = splice.index + removedCount;
+          var lastShiftedIndex = groupItems.length - 1;
+          var applyIndexShift = function(currentIndex) {
+            var siblingItemsIndex = this._itemIndexes[groupName][i];
+            var siblingNewGroupIndex = i + indexShift;
+            this._removePathLink(siblingItemsIndex);
+            this._createPathLink(siblingItemsIndex, groupName, siblingNewGroupIndex);
+          }.bind(this);
+
+          // Iteration order depends on the value of the index shift, because we
+          // need to make sure we aren't overriding values we haven't visited yet
+          if (indexShift > 0) {
+            for (var i = lastShiftedIndex; i >= firstShiftedIndex; i--) {
+              applyIndexShift(i);
+            }
+          } else {
+            for (var i = firstShiftedIndex; i <= lastShiftedIndex; i++) {
+              applyIndexShift(i);
+            }
+          }
+        }
+
+        // Add links for all of the items that are about to be added
+        for (var i = 0; i < addedCount; i++) {
+          var currentAddition = splice.added[i];
+          var insertIndex = splice.index + i;
+          var itemsIndex = parseInt(currentAddition.path.substring(6)); // everything after 'items.'
+          this._createPathLink(itemsIndex, groupName, insertIndex);
+        }
+
+        // Once all of the path links are correct, perform the splice
+        var groupPath = 'groups.' + groupName;
+        var addedItems = splice.added.map(function(addition) { return addition.value });
+        this.splice(groupPath, splice.index, removedCount, ...addedItems);
+
+        // If the number of elements has changed, check to see if the group is now empty/now populated
+        if (indexShift !== 0) { 
+          var group = this.groups[groupName];
+          if (group.length === 0) {
+            var groupNameIndex = this.groupNames.indexOf(groupName);
+            this.splice('groupNames', groupNameIndex, 1);
+          } else if (addedCount === group.length) {
+            this.splice('groupNames', this.groupNames.length, 0, groupName);
+          }
+        }
+      },
+
+      /**
+       * Removes an item from it's current group and relocates it to the group that it
+       * should be in based on it's groupBy property value.
+       * 
+       * @param {number} itemsIndex - The index of the object in the 'items' property.
+       */
+      _relocateItemToCorrectGroup : function(itemsIndex) {
+        var item = this.items[itemsIndex];
+        var itemsPath = 'items.' + itemsIndex;
+        var currentIndex = this._groupIndexes[itemsIndex];
+        var currentGroupName = this._groupNames[itemsIndex];
+        var currentGroupPath = 'groups.' + currentGroupName;
+        var newGroupName = (this._isDefined(item)? item[this.groupBy] : undefined);
+
+        // Remove the item from it's current group
+        this._removePathLink(itemsIndex);
+        this._performGroupSplice(currentGroupName, {
+          'index' : currentIndex,
+          'removedCount' : 1,
+          'added' : []
+        });
+
+        // Insert the item into it's new group
+        if (this._isDefined(newGroupName)) {
+          this._createGroupIfNotExists(newGroupName);
+          var insertIndex = this._getGroupInsertionIndex(newGroupName, itemsIndex);
+          this._performGroupSplice(newGroupName, {
+            'index' : insertIndex,
+            'removedCount' : 0,
+            'added' : [{
+              'path' : itemsPath,
+              'value' : item
+            }]
+          });
+        }
+      },
+
+      /**
+       * Defines the position and the added/removals to perform on a group.
+       * 
+       * @typedef {Object} GroupSplice
+       * @property {number} index - The index to perform the splice at.
+       * @property {number} removedCount - The number of items removed.
+       * @property {Object[]} added - The details of the items to be added.
+       * @property {string} added[].path - The path to the corresponding object in the 'items' property.
+       * @property {Object} added[].value - The value of the item.
+       */
+
+      /**
+       * Calculates the splices that need to be performed on each group as a result
+       * of some splices that were performed on the 'items' property.
+       *
+       * @param {Object[]} itemsSplices - The splices that were performed on the 'items' property.
+       * @returns {Object<string,GroupSplice[]>} - A dictionary from group name to the splices that need to be performed. 
+       */ 
+      _calculateGroupSplices : function(itemsSplices) {
+        // Create a dictionary to store the group slices, and a utility method for
+        // accessing entries in the dictionary during the calculation
+        var groupsSplices = {};
+        var getIndexSplices = function(groupName, index) {
+          var groupSplices = groupsSplices[groupName] = groupsSplices[groupName] || [];
+          var indexSplices = groupSplices.find(function(splice) { return splice.index === index });
+          if (!indexSplices) {
+            indexSplices = {
+              'index' : index,
+              'added' : [],
+              'removedCount' : 0
+            };
+            groupSplices.push(indexSplices);
+          }
+          return indexSplices;
+        }.bind(this);
+
+        for (var i = 0; i < itemsSplices.length; i++) {
+          // Map each of the removed items to a corresponding
+          // removal of their group object
+          var splice = itemsSplices[i];
+          var index = splice.index;
+          var removedItems = splice.removed;
+          for (var j = 0; j < removedItems.length; j++) {
+            var removedItem = removedItems[j];
+            var itemsIndex = index + j;
+            var item = this.items[itemsIndex];
+            var groupName = this._groupNames[itemsIndex];
+            var removedIndex = this._groupIndexes[itemsIndex];
+            var indexSplices = getIndexSplices(groupName, removedIndex);
+            indexSplices.removedCount++;
+          }
+
+          // Map each of the added items to an insertion into
+          // the corresponding group
+          var addedCount = splice.addedCount;
+          for (var i = index; i < (index + addedCount); i++) {
+            var item = this.items[i];
+            var groupName = (this._isDefined(item)? item[this.groupBy] : null);
+            if (this._isDefined(groupName)) {
+              this._createGroupIfNotExists(groupName);
+              var insertIndex = this._getGroupInsertionIndex(groupName, i);
+              var indexSplices =  getIndexSplices(groupName, insertIndex);
+              var itemsPath = 'items.' + i;
+              indexSplices.added.push({
+                'path' : itemsPath,
+                'value' : item
+              });
+            }
+          }
+        }
+
+        // Normalise the splices for each group so that they are
+        // ready for the caller to execute
+        var groupsSplicesEntries = Object.entries(groupsSplices);
+        for (var i = 0; i < groupsSplicesEntries.length; i++) {
+          var entry = groupsSplicesEntries[i];
+          groupsSplices[entry[0]] = this._normaliseGroupSplices(entry[1]);
+        }
+
+        return groupsSplices;
+      },
+
+      /**
+       * Normalises a list of group splices to produce the minimal set of
+       * splices that will result in the same outcome when performed, and
+       * returns them in the order they should be executed.
+       * 
+       * @param {GroupSplice[]} splices - A list of splices to perform on a group.
+       * @return An equivalent normalised set of splices. 
+       */
+      _normaliseGroupSplices : function(splices) {
+        var normalisedSplices = [];
+        if (splices.length !== 0) {
+          // Process the splices in ascending order so we can merge
+          // as we iterate (if we detect that a splice would be absorbed by
+          // on of the previous splices) 
+          splices.slice().sort(function(a, b) {
+            return a.index - b.index;
+          });
+
+          var firstSplice = splices[0];
+          var shiftAmount = firstSplice.added.length - firstSplice.removedCount;
+          var currentNormalisedIndex = firstSplice.index;
+          var currentNormalisedSplice = Object.assign({}, firstSplice);
+          normalisedSplices.push(currentNormalisedSplice);
+          
+          for (var i = 1; i < splices.length; i++) {
+            var currentSplice = splices[i];
+            var originalIndex = currentSplice.index;
+            var shiftedIndex = originalIndex + shiftAmount;
+            var added = currentSplice.added;
+            var removedCount = currentSplice.removedCount;
+            shiftAmount += (added.length - removedCount);
+            var isSpliceMerged = originalIndex <= (currentNormalisedIndex + currentNormalisedSplice.removedCount);
+            if (isSpliceMerged) {
+              currentNormalisedSplice.added.push.apply(currentNormalisedSplice.added, added);
+              currentNormalisedSplice.removedCount += removedCount;
+            } else {
+              currentNormalisedIndex = shiftedIndex;
+              currentNormalisedSplice = Object.assign({}, currentSplice);
+              normalisedSplices.push(currentNormalisedSplice);
+            }
+          }
+        }
+
+        // Since each splice shifts the elements after it when it is performed,
+        // the caller will need to perform them in descending order to be sure
+        // that the index of each splice is still correct
+        return normalisedSplices.reverse();
+      },
+
+      /**
+       * Discards all of the existing groups and re-builds them based on the current set of items.
+       * 
+       * @private
+       */
+      _rebuildGroups : function() {
+        var linkedItemIndexes = Object.keys(this._groupNames);
+        for (var i = 0; i < linkedItemIndexes.length; i++) {
+          var itemsIndex = linkedItemIndexes[i];
+          this._removePathLink(itemsIndex);
+        }
+        if (this._isDefined(this.items, this.groupBy)) {
+          this._setGroups(this.items.reduce(function(accumulator, element, itemsIndex) {
+            var groupName = element[this.groupBy];
+            accumulator[groupName] = accumulator[groupName] || [];
+            var groupIndex = accumulator[groupName].push(element) - 1;
+            this._createPathLink(itemsIndex, groupName, groupIndex);
+            return accumulator;
+          }.bind(this), {}));
+          this._setGroupNames(Object.keys(this.groups));
+        } else if (Object.keys(this.groups).length != 0) {
+          // If the items and groupBy are not both defined,
+          // then we need to reset the groups to an empty object
+          // (unless the groups are ALREADY an empty object)
+          this._setGroups({});
+          this._setGroupNames([]);
+        }
+      },
+
+      /**
+       * Removes any path link that exists for the item with the given index.
+       * 
+       * @param {number} itemsIndex - The index of the item in the 'items' property.
+       */
+      _removePathLink : function(itemsIndex) {
+        var groupName = this._groupNames[itemsIndex];
+        var groupIndex = this._groupIndexes[itemsIndex];
+        this.unlinkPaths('items.' + itemsIndex);
+        this._groupNames[itemsIndex] = undefined;
+        this._groupIndexes[itemsIndex] = undefined;
+        this._itemIndexes[groupName][groupIndex] = undefined;
+      },
+
+      /**
+       * Creates a link to associate an item in the 'items property with it's
+       * equivalent in the group.
+       * 
+       * @param {number} itemsIndex - The index of the object in the 'items' property.
+       * @param {string} groupName - The name of the group it belongs to.
+       * @param {number} groupIndex - The index of the object in it's group.
+       */
+      _createPathLink : function(itemsIndex, groupName, groupIndex) {
+        var itemsPath = 'items.' + itemsIndex;
+        var groupsPath = 'groups.' + groupName + '.' + groupIndex;
+        this.linkPaths(itemsPath, groupsPath);
+        this._groupNames[itemsIndex] = groupName;
+        this._groupIndexes[itemsIndex] = groupIndex;
+        this._itemIndexes[groupName] = this._itemIndexes[groupName] || [];
+        this._itemIndexes[groupName][groupIndex] = itemsIndex;
+      },
+
+     /**
+      * Returns the segments obtained by splitting the given path at each dot.
+      * 
+      * @param {string} path The path to split.
+      * @param {number} [maxSegments] The maximum number of segments to return.
+      * @return {string[]} The segments of the path obtained by splitting at each dot.
+      */
+      _getSegments : function(path, maxSegments) {
+        var segments = [];
+        var lastSegmentEndIndex = -1;
+        
+        do {
+          var segmentStartIndex = lastSegmentEndIndex + 1;
+          var segmentEndIndex = path.indexOf('.', segmentStartIndex);
+          if (segmentEndIndex === -1) {
+            segmentEndIndex = path.length;
+          }
+
+          var segment = path.substring(segmentStartIndex, segmentEndIndex);
+          segments.push(segment);
+          lastSegmentEndIndex = segmentEndIndex;
+        } while (lastSegmentEndIndex !== path.length && segments.length !== maxSegments);
+
+        return segments;
+      },
+
+      /**
+       * Returns the index that an item should be inserted into a group.
+       * 
+       * @param {string} groupName - The name of the group to insert into.
+       * @param {number} itemsIndex - The index of the object in the 'items' property.
+       */
+      _getGroupInsertionIndex : function(groupName, itemsIndex) {
+        var groupItems = this.groups[groupName];
+        var insertionIndex = this._binarySearch(groupItems, itemsIndex, function(index) {
+          var groupItemItemsIndex = this._itemIndexes[groupName][index];
+          return groupItemItemsIndex - itemsIndex;
+        }.bind(this)); 
+
+        // If the returned value from the binary search is positive, it means that
+        // the item that is currently positioned at the given items index is also
+        // part of the group. In this scenario, we just want to insert the item
+        // in the same position in the group as well. If the returned value is
+        // negative, it means that the item doesn't exist in the group, and the
+        // one's complement will give us the position that it SHOULD exist. 
+        if (insertionIndex < 0) {
+          insertionIndex = ~insertionIndex;
+        }
+
+        return insertionIndex;
+      },
+
+     /**
+      * This callback defines the criteria for determining whether a search value
+      * is located before or after a particular item in the list.
+      * 
+      * @callback searchComparator
+      * @param {object} index The item in the list that is currently being compared.
+      */
+     /**
+      * This method performs a binary search for a value in a sorted list of items.
+      * If the value exists, this method returns the index at which it is located.
+      * Otherwise, it returns the ones' complement of the index that it have existed
+      * if it was part of the list. 
+      *
+      * @param {object[]} items The sorted list of items to search through.
+      * @param {object} value The value that is being searched for.
+      * @param {searchComparator} comparator The comparator used to sort the items.
+      */
+      _binarySearch : function(items, value, comparator) {
+        var start = 0;
+        var end = items.length - 1;
+        var index = 0;
+        while (start <= end) {
+            var middle = Math.floor((start + end) / 2);
+            var item = items[middle];
+            var diff = comparator(middle);
+            if (diff < 0) {
+              start = middle + 1;
+            } else if (diff > 0) {
+              end = middle - 1;
+            } else {
+              return middle;
+            }
+        }
+
+        // If no match was found, return the one's complement
+        // of the start (which is the index  the item would 
+        // have been at if it existed)
+        return ~start;
+      },
+
+      /**
+       * Creates a group if it does not already exist.
+       * 
+       * @param {string} groupName - The name of the group.
+       * @private
+       */
+      _createGroupIfNotExists : function(groupName) {
+          var group = this.groups[groupName];
+          if (!this._isDefined(group)) {
+            this.set('groups.' + groupName, []);
+          }
+      },
+
+     /**
+      * Returns a flag indicating whether all of the given values are defined.
+      *
+      * @param {...object}  values The value(s) to check.
+      * @returns {boolean} A flag indicating whether all of the given values are defined.
+      * @private
+      */
+      _isDefined(...values) {
+        return !values.some(function (value) {
+            return value === undefined || value === null;
+        });
+      }
+    });
+  </script>
+</dom-module>

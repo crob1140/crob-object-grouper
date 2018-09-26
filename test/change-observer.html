@@ -1,0 +1,25 @@
+<!doctype html>
+
+<link rel="import" href="../../polymer/polymer.html">
+<script>
+    Polymer({
+        is: "change-observer",
+
+        properties: {
+            items: {
+                type: Array
+            },
+            groups: {
+                type: Object 
+            }
+        },
+
+        observers: [
+            'onItemsChanged(items.*)',
+            'onGroupsChanged(groups.*)'
+        ],
+
+        onItemsChanged: function () { },
+        onGroupsChanged: function () { }
+    });
+</script>
